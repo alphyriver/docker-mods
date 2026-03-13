@@ -99,7 +99,9 @@ README.md             # usage docs for this mod
     └── build.yml     # Forgejo CI pipeline
 ```
 
-### Dockerfile Template
+### Dockerfile Patterns
+
+**Simple (overlay files only):**
 
 ```dockerfile
 # syntax=docker/dockerfile:1
@@ -108,7 +110,22 @@ LABEL maintainer="your-handle"
 COPY root/ /
 ```
 
-Multi-stage builds go into `Dockerfile.complex` when downloads or compilation are required during image creation.
+**Multi-stage (download or compile during build):**
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM --platform=${BUILDPLATFORM} alpine:3.20 AS downloader
+ARG TARGETPLATFORM
+RUN # ... download binary for ${TARGETPLATFORM} ...
+RUN cp /path/to/binary /root-layer/usr/local/bin/tool
+
+FROM scratch
+LABEL maintainer="your-handle"
+COPY root/ /
+COPY --from=downloader /root-layer/ /
+```
+
+Use multi-stage when the mod needs to download binaries or compile assets at build time. The final image is always `FROM scratch` — a single layer.
 
 ---
 
