@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+echo "**** Claude Code mod: initializing ****"
+
+if command -v claude >/dev/null 2>&1; then
+    CLAUDE_VER=$(claude --version 2>&1 || true)
+    echo "**** Claude Code installed: ${CLAUDE_VER} ****"
+else
+    echo "**** ERROR: claude binary not found at /usr/local/bin/claude ****"
+    exit 1
+fi
+
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "**** WARNING: ANTHROPIC_API_KEY is not set ****"
+    echo "****          Add: -e ANTHROPIC_API_KEY=sk-ant-... to your container ****"
+else
+    echo "**** ANTHROPIC_API_KEY is configured ****"
+fi
+
+echo "**** Claude Code mod: done ****"

@@ -1,0 +1,7 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Force LF for s6 scripts — prevents CRLF corruption on Windows checkouts
+root/etc/s6-overlay/s6-rc.d/*/run  text eol=lf
+root/etc/s6-overlay/s6-rc.d/*/up   text eol=lf
+root/etc/s6-overlay/s6-rc.d/*/type text eol=lf
