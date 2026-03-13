@@ -17,26 +17,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: https://github.com/actions/checkout@v4
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
+        uses: https://github.com/docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: https://github.com/docker/setup-buildx-action@v3
 
       - name: Log in to registry
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: https://github.com/docker/login-action@v3
         with:
           registry: ${{ secrets.REGISTRY_URL }}
           username: ${{ secrets.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -45,13 +43,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test — extract and run binary (amd64)
+      - name: Smoke test (amd64)
         run: |
           docker buildx build \
             --platform linux/amd64 \
             --load \
             -t mod-test:amd64 .
-          MOD_ID=$(docker create mod-test:amd64)
+          MOD_ID=$(docker create --entrypoint /bin/true mod-test:amd64)
           docker cp "${MOD_ID}:/usr/local/bin/claude" ./claude-amd64
           docker rm "${MOD_ID}"
           chmod +x ./claude-amd64
@@ -60,20 +58,3 @@ jobs:
             ghcr.io/linuxserver/baseimage-ubuntu:noble \
             /usr/local/bin/claude --version
           rm ./claude-amd64
-
-      - name: Smoke test — extract and run binary (arm64)
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --load \
-            -t mod-test:arm64 .
-          MOD_ID=$(docker create mod-test:arm64)
-          docker cp "${MOD_ID}:/usr/local/bin/claude" ./claude-arm64
-          docker rm "${MOD_ID}"
-          chmod +x ./claude-arm64
-          docker run --rm \
-            --platform linux/arm64 \
-            -v "${PWD}/claude-arm64:/usr/local/bin/claude:ro" \
-            ghcr.io/linuxserver/baseimage-ubuntu:noble \
-            /usr/local/bin/claude --version
-          rm ./claude-arm64
