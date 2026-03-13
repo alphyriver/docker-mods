@@ -11,39 +11,95 @@ on:
 
 env:
   IMAGE_TAG: vscode-claude-code
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
 jobs:
   build:
-    # Requires a runner label mapped to a Docker-capable image, e.g.:
-    #   ubuntu-docker:docker://catthehacker/ubuntu:act-latest
-    runs-on: ubuntu-docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      docker:
+        image: docker:29.1.5-dind-alpine3.23
+        credentials:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        options: --privileged
+        env:
+          DOCKER_TLS_CERTDIR: ""
+
+    container:
+      image: docker:29.1.5-alpine3.23
+      credentials:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    env:
+      DOCKER_HOST: tcp://docker:2375
+      DOCKER_TLS_CERTDIR: ""
+
     steps:
+      - name: Install base dependencies
+        run: |
+          apk add --no-cache git nodejs bash curl
+          [ -f /usr/bin/node ] || ln -s /usr/bin/nodejs /usr/bin/node
+          git config --global --add safe.directory "*"
+
       - name: Checkout
-        uses: https://github.com/actions/checkout@v4
+        uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for Docker daemon
+        run: |
+          echo "Waiting for Docker daemon..."
+          timeout=60
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            if docker info >/dev/null 2>&1; then
+              echo "Docker daemon is ready (${elapsed}s)"
+              break
+            fi
+            sleep 2
+            elapsed=$((elapsed + 2))
+          done
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker daemon failed to start"
+            exit 1
+          fi
+          docker version
 
       - name: Set up QEMU
-        uses: https://github.com/docker/setup-qemu-action@v3
+        run: |
+          docker run --rm --privileged \
+            tonistiigi/binfmt:latest \
+            --install arm64
 
       - name: Set up Docker Buildx
-        uses: https://github.com/docker/setup-buildx-action@v3
+        run: |
+          docker buildx create --name multiarch --driver docker-container --use
+          docker buildx inspect --bootstrap
 
-      - name: Log in to registry
+      - name: Docker login to registry
         if: github.event_name == 'push'
-        uses: https://github.com/docker/login-action@v3
-        with:
-          registry: ${{ secrets.REGISTRY_URL }}
-          username: ${{ secrets.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | \
+            docker login "${{ secrets.REGISTRY_URL }}" \
+              -u "${{ secrets.REGISTRY_USER }}" \
+              --password-stdin
 
       - name: Build and push
-        uses: https://github.com/docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ secrets.REGISTRY_URL }}/docker-mods:${{ env.IMAGE_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: |
+          PUSH_FLAG=""
+          if [ "${{ github.event_name }}" = "push" ]; then
+            PUSH_FLAG="--push"
+          fi
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag "${{ secrets.REGISTRY_URL }}/docker-mods:${IMAGE_TAG}" \
+            ${PUSH_FLAG} \
+            .
 
       - name: Smoke test (amd64)
         run: |
@@ -51,12 +107,15 @@ jobs:
             --platform linux/amd64 \
             --load \
             -t mod-test:amd64 .
+
           MOD_ID=$(docker create --entrypoint /bin/true mod-test:amd64)
           docker cp "${MOD_ID}:/usr/local/bin/claude" ./claude-amd64
           docker rm "${MOD_ID}"
           chmod +x ./claude-amd64
+
           docker run --rm \
             -v "${PWD}/claude-amd64:/usr/local/bin/claude:ro" \
             ghcr.io/linuxserver/baseimage-ubuntu:noble \
             /usr/local/bin/claude --version
+
           rm ./claude-amd64
