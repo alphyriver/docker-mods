@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1
 
-FROM --platform=${BUILDPLATFORM} alpine:3.20 AS downloader
+# Use Ubuntu as the build stage so the installer downloads the glibc binary,
+# which matches the target linuxserver/code-server container (Ubuntu Noble).
+FROM ubuntu:noble AS downloader
 
 ARG TARGETPLATFORM
 ARG CLAUDE_VERSION=""
 
-RUN apk add --no-cache curl bash
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     case "${TARGETPLATFORM}" in \
