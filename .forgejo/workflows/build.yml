@@ -14,7 +14,9 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Requires a runner label mapped to a Docker-capable image, e.g.:
+    #   ubuntu-docker:docker://catthehacker/ubuntu:act-latest
+    runs-on: ubuntu-docker
     steps:
       - name: Checkout
         uses: https://github.com/actions/checkout@v4
