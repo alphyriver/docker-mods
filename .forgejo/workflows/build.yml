@@ -83,9 +83,9 @@ jobs:
       - name: Docker login to registry
         if: github.event_name == 'push'
         run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" | \
-            docker login "${{ secrets.REGISTRY_URL }}" \
-              -u "${{ secrets.REGISTRY_USER }}" \
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | \
+            docker login \
+              -u "${{ secrets.DOCKERHUB_USERNAME }}" \
               --password-stdin
 
       - name: Build and push
