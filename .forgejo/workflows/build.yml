@@ -7,7 +7,15 @@ on:
   pull_request:
     branches:
       - vscode-claude-code
+  schedule:
+    - cron: '0 18 * * *'  # Daily at 2am SGT (UTC+8)
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if version already exists'
+        required: false
+        type: boolean
+        default: false
 
 # Prevent duplicate runs for the same ref
 concurrency:
@@ -35,37 +43,97 @@ jobs:
         with:
           dockerfile: Dockerfile
 
-  # ── Metadata ──────────────────────────────────────────────────────
-  metadata:
-    name: Build Metadata
+  # ── Check Release ────────────────────────────────────────────────
+  check-release:
+    name: Check Upstream Release
     runs-on: ubuntu-latest
     outputs:
-      registry_host: ${{ steps.meta.outputs.registry_host }}
-      image_base: ${{ steps.meta.outputs.image_base }}
-      image_tag: ${{ steps.meta.outputs.image_tag }}
+      skip_build: ${{ steps.check.outputs.skip_build }}
+      version: ${{ steps.check.outputs.version }}
+      registry_host: ${{ steps.check.outputs.registry_host }}
+      image_base: ${{ steps.check.outputs.image_base }}
     steps:
-      - name: Derive registry and image metadata
-        id: meta
+      - name: Install dependencies
         run: |
+          apt-get update
+          apt-get install -y jq curl
+
+      - name: Check for new upstream release
+        id: check
+        env:
+          FORGEJO_TOKEN: ${{ secrets.APPLICATION_TOKEN }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+        run: |
+          # Extract registry info (used by all downstream jobs)
           REGISTRY_HOST=$(echo "${{ github.server_url }}" | sed 's|https://||')
           IMAGE_BASE="${REGISTRY_HOST}/${{ github.repository }}"
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
           echo "registry_host=${REGISTRY_HOST}" >> "$GITHUB_OUTPUT"
           echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${IMAGE_BASE}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Registry: ${REGISTRY_HOST}"
-          echo "Building: ${IMAGE_BASE}:${SHORT_SHA}"
+
+          # For push/PR events, always build (version check is for schedule/dispatch only)
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Push/PR event — skipping version check, always build"
+            # Get version from npm for tagging purposes
+            TARGET_VERSION=$(curl -sf "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" | jq -r '.version')
+            echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Fetch latest Claude Code version from npm
+          TARGET_VERSION=$(curl -sf "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" | jq -r '.version')
+          if [ -z "$TARGET_VERSION" ] || [ "$TARGET_VERSION" = "null" ]; then
+            echo "::error::Failed to fetch latest Claude Code version from npm"
+            exit 1
+          fi
+          echo "Latest Claude Code release: $TARGET_VERSION"
+
+          # Get latest release from this repository
+          curl --silent -L -H "Authorization: token ${FORGEJO_TOKEN}" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases?limit=1" > releases.json
+
+          REPO_RELEASE=$(jq -r 'if type=="array" and length > 0 then .[0].tag_name else "0.0.0" end' releases.json)
+          if [ "$REPO_RELEASE" = "null" ] || [ -z "$REPO_RELEASE" ]; then
+            REPO_RELEASE="0.0.0"
+          fi
+          echo "Repository release: $REPO_RELEASE"
+
+          # Check if we should skip build
+          if [ "$FORCE_BUILD" = "true" ]; then
+            echo "Force build enabled, proceeding"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$TARGET_VERSION" = "$REPO_RELEASE" ]; then
+            echo "Already on version $TARGET_VERSION, skipping build"
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version available: $TARGET_VERSION (current: $REPO_RELEASE)"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
+          fi
 
   # ── Build ────────────────────────────────────────────────────────
   build:
     name: Build Image
     runs-on: ubuntu-latest
-    needs: [lint, metadata]
+    needs: [lint, check-release]
+    if: |
+      always() &&
+      needs.check-release.outputs.skip_build == 'false' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
     outputs:
-      image_tag: ${{ needs.metadata.outputs.image_tag }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Generate metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          IMAGE_TAG="${{ needs.check-release.outputs.image_base }}:${SHORT_SHA}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building: ${IMAGE_TAG}"
 
       - name: Create build context
         run: |
@@ -79,20 +147,20 @@ jobs:
           args: >-
             -c "AUTH=$(echo -n '${{ env.REGISTRY_USER }}:${{ secrets.APPLICATION_TOKEN }}' | base64) &&
             mkdir -p /kaniko/.docker &&
-            printf '{\"auths\":{\"${{ needs.metadata.outputs.registry_host }}\":{\"auth\":\"%s\"}}}' $AUTH > /kaniko/.docker/config.json &&
+            printf '{\"auths\":{\"${{ needs.check-release.outputs.registry_host }}\":{\"auth\":\"%s\"}}}' $AUTH > /kaniko/.docker/config.json &&
             TARBALL=$(find / -name 'context.tar.gz' 2>/dev/null | head -1) &&
             /kaniko/executor
             --context=tar://$TARBALL
             --dockerfile=Dockerfile
-            --destination=${{ needs.metadata.outputs.image_tag }}
-            --custom-platform=linux/amd64
-            --build-arg=TARGETPLATFORM=linux/amd64"
+            --destination=${{ steps.meta.outputs.image_tag }}
+            --custom-platform=linux/amd64"
 
   # ── Test ──────────────────────────────────────────────────────────
   test:
     name: Test Image
     runs-on: ubuntu-latest
-    needs: [build, metadata]
+    needs: [build, check-release]
+    if: needs.check-release.outputs.skip_build == 'false'
     steps:
       - name: Install crane
         run: |
@@ -102,16 +170,16 @@ jobs:
 
       - name: Login to registry
         run: |
-          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.check-release.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
       - name: Verify image manifest
         run: |
-          crane manifest ${{ needs.metadata.outputs.image_tag }}
-          echo "Image verified: ${{ needs.metadata.outputs.image_tag }}"
+          crane manifest ${{ needs.build.outputs.image_tag }}
+          echo "Image verified: ${{ needs.build.outputs.image_tag }}"
 
       - name: Smoke test — verify claude binary
         run: |
-          crane export ${{ needs.metadata.outputs.image_tag }} - | tar -xf - usr/local/bin/claude
+          crane export ${{ needs.build.outputs.image_tag }} - | tar -xf - usr/local/bin/claude
           ls -la usr/local/bin/claude
           file usr/local/bin/claude
           echo "Claude binary verified in image"
@@ -120,7 +188,8 @@ jobs:
   scan:
     name: Security Scan
     runs-on: ubuntu-latest
-    needs: [test, metadata]
+    needs: [test, build, check-release]
+    if: needs.check-release.outputs.skip_build == 'false'
     steps:
       - name: Install Trivy
         run: |
@@ -140,14 +209,14 @@ jobs:
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --format table \
-            ${{ needs.metadata.outputs.image_tag }}
+            ${{ needs.build.outputs.image_tag }}
 
           trivy image \
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --format json \
             --output trivy-results.json \
-            ${{ needs.metadata.outputs.image_tag }}
+            ${{ needs.build.outputs.image_tag }}
 
       - name: Analyze results
         run: |
@@ -172,8 +241,8 @@ jobs:
   deploy:
     name: Deploy Tags
     runs-on: ubuntu-latest
-    needs: [scan, metadata]
-    if: github.event_name == 'push'
+    needs: [scan, build, check-release]
+    if: github.event_name != 'pull_request' && needs.check-release.outputs.skip_build == 'false'
     steps:
       - name: Install crane
         run: |
@@ -183,21 +252,61 @@ jobs:
 
       - name: Login to registry
         run: |
-          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.check-release.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
-      - name: Tag as release
+      - name: Tag as latest and version
         run: |
-          FINAL_TAG="${{ needs.metadata.outputs.image_base }}:${{ env.IMAGE_TAG }}"
-          echo "Tagging: ${FINAL_TAG}"
-          crane copy ${{ needs.metadata.outputs.image_tag }} "${FINAL_TAG}"
-          echo "Deployed: ${FINAL_TAG}"
+          VERSION="${{ needs.check-release.outputs.version }}"
+          IMAGE_BASE="${{ needs.check-release.outputs.image_base }}"
+
+          echo "Tagging as ${IMAGE_BASE}:${{ env.IMAGE_TAG }}"
+          crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${{ env.IMAGE_TAG }}"
+
+          if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
+            echo "Tagging as ${IMAGE_BASE}:${VERSION}"
+            crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${VERSION}"
+          fi
+
+  # ── Release ──────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [deploy, check-release]
+    if: github.event_name != 'pull_request' && needs.check-release.outputs.skip_build == 'false'
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Create release
+        env:
+          FORGEJO_TOKEN: ${{ secrets.APPLICATION_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "No version available, skipping release"
+            exit 0
+          fi
+
+          echo "Creating release: ${VERSION}"
+          curl -X POST \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases" \
+            -d "{
+              \"tag_name\": \"${VERSION}\",
+              \"target\": \"${{ github.sha }}\",
+              \"name\": \"Claude Code ${VERSION}\",
+              \"body\": \"Docker mod updated to Claude Code ${VERSION}\",
+              \"draft\": false,
+              \"prerelease\": false
+            }"
 
   # ── Cleanup ───────────────────────────────────────────────────────
   cleanup:
     name: Cleanup
     runs-on: ubuntu-latest
-    needs: [deploy, metadata]
-    if: always() && needs.metadata.outputs.image_tag != ''
+    needs: [deploy, build, check-release]
+    if: always() && needs.check-release.outputs.skip_build == 'false' && needs.build.outputs.image_tag != ''
     steps:
       - name: Install crane
         run: |
@@ -207,10 +316,10 @@ jobs:
 
       - name: Login to registry
         run: |
-          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.check-release.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
       - name: Delete temporary tag
         run: |
-          echo "Cleaning up temporary tag: ${{ needs.metadata.outputs.image_tag }}"
-          crane delete ${{ needs.metadata.outputs.image_tag }} || true
+          echo "Cleaning up temporary tag: ${{ needs.build.outputs.image_tag }}"
+          crane delete ${{ needs.build.outputs.image_tag }} || true
           echo "Cleanup complete"
