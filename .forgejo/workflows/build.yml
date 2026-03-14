@@ -98,16 +98,23 @@ jobs:
           fi
           echo "Repository release: $REPO_RELEASE"
 
+          # Release tags use format: vscode-claude-code-<version>
+          RELEASE_TAG="${{ env.IMAGE_TAG }}-${TARGET_VERSION}"
+
+          # Strip the branch prefix from repo release for comparison
+          REPO_VERSION=$(echo "$REPO_RELEASE" | sed "s/^${{ env.IMAGE_TAG }}-//")
+          echo "Repo version: $REPO_VERSION"
+
           # Check if we should skip build
           if [ "$FORCE_BUILD" = "true" ]; then
             echo "Force build enabled, proceeding"
             echo "skip_build=false" >> "$GITHUB_OUTPUT"
             echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
-          elif [ "$TARGET_VERSION" = "$REPO_RELEASE" ]; then
+          elif [ "$TARGET_VERSION" = "$REPO_VERSION" ]; then
             echo "Already on version $TARGET_VERSION, skipping build"
             echo "skip_build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "New version available: $TARGET_VERSION (current: $REPO_RELEASE)"
+            echo "New version available: $TARGET_VERSION (current: $REPO_VERSION)"
             echo "skip_build=false" >> "$GITHUB_OUTPUT"
             echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
           fi
@@ -263,8 +270,9 @@ jobs:
           crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${{ env.IMAGE_TAG }}"
 
           if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
-            echo "Tagging as ${IMAGE_BASE}:${VERSION}"
-            crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${VERSION}"
+            VERSION_TAG="${{ env.IMAGE_TAG }}-${VERSION}"
+            echo "Tagging as ${IMAGE_BASE}:${VERSION_TAG}"
+            crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${VERSION_TAG}"
           fi
 
   # ── Release ──────────────────────────────────────────────────────
@@ -274,8 +282,9 @@ jobs:
     needs: [deploy, check-release]
     if: github.event_name != 'pull_request' && needs.check-release.outputs.skip_build == 'false'
     steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y jq
 
       - name: Create release
         env:
@@ -287,16 +296,57 @@ jobs:
             exit 0
           fi
 
-          echo "Creating release: ${VERSION}"
+          RELEASE_TAG="${{ env.IMAGE_TAG }}-${VERSION}"
+          IMAGE_BASE="${{ needs.check-release.outputs.image_base }}"
+          echo "Creating release: ${RELEASE_TAG}"
+
+          # Build release body
+          BODY=$(cat <<'BODY_EOF'
+          ## Docker Mod: vscode-claude-code
+
+          Installs the [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) CLI into [linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers.
+
+          ### What changed
+
+          Claude Code CLI updated to **VERSION_PLACEHOLDER**.
+
+          ### Image tags
+
+          | Tag | Description |
+          |-----|-------------|
+          | `IMAGE_BASE_PLACEHOLDER:vscode-claude-code` | Always points to the latest build |
+          | `IMAGE_BASE_PLACEHOLDER:RELEASE_TAG_PLACEHOLDER` | Pinned to this specific version |
+
+          ### Usage
+
+          ```yaml
+          services:
+            code-server:
+              image: lscr.io/linuxserver/code-server:latest
+              environment:
+                - DOCKER_MODS=IMAGE_BASE_PLACEHOLDER:vscode-claude-code
+                - ANTHROPIC_API_KEY=sk-ant-your-key-here
+          ```
+          BODY_EOF
+          )
+
+          # Replace placeholders
+          BODY=$(echo "$BODY" | sed "s|VERSION_PLACEHOLDER|${VERSION}|g")
+          BODY=$(echo "$BODY" | sed "s|IMAGE_BASE_PLACEHOLDER|${IMAGE_BASE}|g")
+          BODY=$(echo "$BODY" | sed "s|RELEASE_TAG_PLACEHOLDER|${RELEASE_TAG}|g")
+
+          # Escape for JSON
+          BODY_JSON=$(printf '%s' "$BODY" | jq -Rs .)
+
           curl -X POST \
             -H "Authorization: token ${FORGEJO_TOKEN}" \
             -H "Content-Type: application/json" \
             "${{ github.api_url }}/repos/${{ github.repository }}/releases" \
             -d "{
-              \"tag_name\": \"${VERSION}\",
+              \"tag_name\": \"${RELEASE_TAG}\",
               \"target\": \"${{ github.sha }}\",
-              \"name\": \"Claude Code ${VERSION}\",
-              \"body\": \"Docker mod updated to Claude Code ${VERSION}\",
+              \"name\": \"vscode-claude-code: Claude Code ${VERSION}\",
+              \"body\": ${BODY_JSON},
               \"draft\": false,
               \"prerelease\": false
             }"
