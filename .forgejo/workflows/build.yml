@@ -1,4 +1,4 @@
-name: Build and Push Docker Mod
+name: CI/CD Pipeline
 
 on:
   push:
@@ -9,131 +9,253 @@ on:
       - vscode-claude-code
   workflow_dispatch:
 
+# Prevent duplicate runs for the same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE_TAG: vscode-claude-code
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  REGISTRY_USER: package-bot
+  CRANE_VERSION: v0.20.2
+  HADOLINT_VERSION: v2.12.0-alpine
 
 jobs:
-  build-and-test:
+  # ── Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint Dockerfile
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      docker:
-        image: docker:29.1.5-dind-alpine3.23
-        credentials:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-        options: --privileged
-        env:
-          DOCKER_TLS_CERTDIR: ""
-
-    container:
-      image: docker:29.1.5-alpine3.23
-      credentials:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-    env:
-      DOCKER_HOST: tcp://docker:2375
-      DOCKER_TLS_CERTDIR: ""
-
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     steps:
-      - name: Install base dependencies
-        run: |
-          apk add --no-cache git nodejs bash curl sed
-          [ -f /usr/bin/node ] || ln -s /usr/bin/nodejs /usr/bin/node
-          git config --global --add safe.directory "*"
-
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive registry host and image base
+      - name: Run Hadolint
+        uses: https://github.com/hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  # ── Metadata ──────────────────────────────────────────────────────
+  metadata:
+    name: Build Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      registry_host: ${{ steps.meta.outputs.registry_host }}
+      image_base: ${{ steps.meta.outputs.image_base }}
+      image_tag_amd64: ${{ steps.meta.outputs.image_tag_amd64 }}
+      image_tag_arm64: ${{ steps.meta.outputs.image_tag_arm64 }}
+    steps:
+      - name: Derive registry and image metadata
         id: meta
         run: |
           REGISTRY_HOST=$(echo "${{ github.server_url }}" | sed 's|https://||')
           IMAGE_BASE="${REGISTRY_HOST}/${{ github.repository }}"
-          echo "registry_host=${REGISTRY_HOST}" >> $GITHUB_OUTPUT
-          echo "image_base=${IMAGE_BASE}" >> $GITHUB_OUTPUT
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          echo "registry_host=${REGISTRY_HOST}" >> "$GITHUB_OUTPUT"
+          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
+          echo "image_tag_amd64=${IMAGE_BASE}:${SHORT_SHA}-amd64" >> "$GITHUB_OUTPUT"
+          echo "image_tag_arm64=${IMAGE_BASE}:${SHORT_SHA}-arm64" >> "$GITHUB_OUTPUT"
           echo "Registry: ${REGISTRY_HOST}"
-          echo "Image: ${IMAGE_BASE}:${IMAGE_TAG}"
+          echo "Image base: ${IMAGE_BASE}"
 
-      - name: Wait for Docker daemon
+  # ── Build (amd64) ────────────────────────────────────────────────
+  build-amd64:
+    name: Build (amd64)
+    runs-on: ubuntu-latest
+    needs: [lint, metadata]
+    outputs:
+      image_tag: ${{ needs.metadata.outputs.image_tag_amd64 }}
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Create build context
         run: |
-          echo "Waiting for Docker daemon..."
-          timeout=60
-          elapsed=0
-          while [ $elapsed -lt $timeout ]; do
-            if docker info >/dev/null 2>&1; then
-              echo "Docker daemon is ready (${elapsed}s)"
-              break
-            fi
-            sleep 2
-            elapsed=$((elapsed + 2))
-          done
-          if ! docker info >/dev/null 2>&1; then
-            echo "ERROR: Docker daemon failed to start"
-            exit 1
-          fi
-          docker version
+          tar -czf /tmp/context.tar.gz -C ${{ github.workspace }} .
+          cp /tmp/context.tar.gz ${{ github.workspace }}/context.tar.gz
 
-      - name: Set up QEMU
+      - name: Build and push with Kaniko
+        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c "AUTH=$(echo -n '${{ env.REGISTRY_USER }}:${{ secrets.APPLICATION_TOKEN }}' | base64) &&
+            mkdir -p /kaniko/.docker &&
+            printf '{\"auths\":{\"${{ needs.metadata.outputs.registry_host }}\":{\"auth\":\"%s\"}}}' $AUTH > /kaniko/.docker/config.json &&
+            TARBALL=$(find / -name 'context.tar.gz' 2>/dev/null | head -1) &&
+            /kaniko/executor
+            --context=tar://$TARBALL
+            --dockerfile=Dockerfile
+            --destination=${{ needs.metadata.outputs.image_tag_amd64 }}
+            --custom-platform=linux/amd64
+            --build-arg=TARGETPLATFORM=linux/amd64"
+
+  # ── Build (arm64) ────────────────────────────────────────────────
+  build-arm64:
+    name: Build (arm64)
+    runs-on: ubuntu-latest
+    needs: [lint, metadata]
+    outputs:
+      image_tag: ${{ needs.metadata.outputs.image_tag_arm64 }}
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Create build context
         run: |
-          docker run --rm --privileged \
-            tonistiigi/binfmt:latest \
-            --install arm64
+          tar -czf /tmp/context.tar.gz -C ${{ github.workspace }} .
+          cp /tmp/context.tar.gz ${{ github.workspace }}/context.tar.gz
 
-      - name: Set up Docker Buildx
+      - name: Build and push with Kaniko
+        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c "AUTH=$(echo -n '${{ env.REGISTRY_USER }}:${{ secrets.APPLICATION_TOKEN }}' | base64) &&
+            mkdir -p /kaniko/.docker &&
+            printf '{\"auths\":{\"${{ needs.metadata.outputs.registry_host }}\":{\"auth\":\"%s\"}}}' $AUTH > /kaniko/.docker/config.json &&
+            TARBALL=$(find / -name 'context.tar.gz' 2>/dev/null | head -1) &&
+            /kaniko/executor
+            --context=tar://$TARBALL
+            --dockerfile=Dockerfile
+            --destination=${{ needs.metadata.outputs.image_tag_arm64 }}
+            --custom-platform=linux/arm64
+            --build-arg=TARGETPLATFORM=linux/arm64"
+
+  # ── Test ──────────────────────────────────────────────────────────
+  test:
+    name: Test Image
+    runs-on: ubuntu-latest
+    needs: [build-amd64, build-arm64, metadata]
+    steps:
+      - name: Install crane
         run: |
-          docker buildx create --name multiarch --driver docker-container --use
-          docker buildx inspect --bootstrap
+          apt-get update && apt-get install -y curl
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xzf - crane
+          mv crane /usr/local/bin/
 
-      # ── Build (amd64 only, loadable) ──────────────────────────────
-      - name: Build image (amd64)
+      - name: Login to registry
         run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            --load \
-            -t mod-test:amd64 .
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
-      # ── Test ──────────────────────────────────────────────────────
-      - name: Smoke test — verify claude binary
+      - name: Verify amd64 image
         run: |
-          MOD_ID=$(docker create --entrypoint /bin/true mod-test:amd64)
-          docker cp "${MOD_ID}:/usr/local/bin/claude" ./claude-amd64
-          docker rm "${MOD_ID}"
-          chmod +x ./claude-amd64
+          crane manifest ${{ needs.metadata.outputs.image_tag_amd64 }}
+          echo "amd64 image verified"
 
-          docker run --rm \
-            -v "${PWD}/claude-amd64:/usr/local/bin/claude:ro" \
-            ghcr.io/linuxserver/baseimage-ubuntu:noble \
-            /usr/local/bin/claude --version
+      - name: Verify arm64 image
+        run: |
+          crane manifest ${{ needs.metadata.outputs.image_tag_arm64 }}
+          echo "arm64 image verified"
 
-          rm ./claude-amd64
-          echo "Smoke test passed"
+      - name: Smoke test — verify claude binary (amd64)
+        run: |
+          crane export ${{ needs.metadata.outputs.image_tag_amd64 }} - | tar -xf - usr/local/bin/claude
+          ls -la usr/local/bin/claude
+          file usr/local/bin/claude
+          echo "Claude binary verified in amd64 image"
 
-      # ── Push (only after tests pass, only on push to branch) ─────
-      - name: Login to Forgejo registry
-        if: github.event_name == 'push'
+  # ── Security Scan ────────────────────────────────────────────────
+  scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [test, metadata]
+    steps:
+      - name: Install Trivy
+        run: |
+          apt-get update
+          apt-get install -y wget apt-transport-https gnupg lsb-release jq
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/trivy.list
+          apt-get update
+          apt-get install -y trivy
+
+      - name: Run vulnerability scan
         env:
-          REGISTRY_USER: ${{ github.repository_owner }}
-          APPLICATION_TOKEN: ${{ secrets.APPLICATION_TOKEN }}
+          TRIVY_USERNAME: ${{ env.REGISTRY_USER }}
+          TRIVY_PASSWORD: ${{ secrets.APPLICATION_TOKEN }}
         run: |
-          echo "${APPLICATION_TOKEN}" | \
-            docker login "${{ steps.meta.outputs.registry_host }}" \
-              -u "${REGISTRY_USER}" \
-              --password-stdin
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --format table \
+            ${{ needs.metadata.outputs.image_tag_amd64 }}
 
-      - name: Build and push (multi-arch)
-        if: github.event_name == 'push'
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --format json \
+            --output trivy-results.json \
+            ${{ needs.metadata.outputs.image_tag_amd64 }}
+
+      - name: Analyze results
         run: |
-          IMAGE="${{ steps.meta.outputs.image_base }}:${IMAGE_TAG}"
-          echo "Pushing: ${IMAGE}"
+          if [ -f trivy-results.json ]; then
+            VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy-results.json)
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "::warning::Found $VULN_COUNT high/critical vulnerabilities"
+              jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | .[] | "\(.Severity): \(.VulnerabilityID) in \(.PkgName)"' trivy-results.json
+            else
+              echo "No high/critical vulnerabilities found"
+            fi
+          fi
 
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --tag "${IMAGE}" \
-            --push \
-            .
+      - name: Upload scan results
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.json
+          retention-days: 7
+
+  # ── Deploy ────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy Tags
+    runs-on: ubuntu-latest
+    needs: [scan, metadata]
+    if: github.event_name == 'push'
+    steps:
+      - name: Install crane
+        run: |
+          apt-get update && apt-get install -y curl
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xzf - crane
+          mv crane /usr/local/bin/
+
+      - name: Login to registry
+        run: |
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+
+      - name: Create multi-arch manifest and tag
+        run: |
+          FINAL_TAG="${{ needs.metadata.outputs.image_base }}:${{ env.IMAGE_TAG }}"
+          echo "Creating multi-arch manifest: ${FINAL_TAG}"
+
+          crane index append \
+            --tag "${FINAL_TAG}" \
+            --manifest ${{ needs.metadata.outputs.image_tag_amd64 }} \
+            --manifest ${{ needs.metadata.outputs.image_tag_arm64 }}
+
+          echo "Deployed: ${FINAL_TAG}"
+
+  # ── Cleanup ───────────────────────────────────────────────────────
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy, metadata]
+    if: always() && needs.metadata.outputs.image_tag_amd64 != ''
+    steps:
+      - name: Install crane
+        run: |
+          apt-get update && apt-get install -y curl
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xzf - crane
+          mv crane /usr/local/bin/
+
+      - name: Login to registry
+        run: |
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+
+      - name: Delete temporary tags
+        run: |
+          echo "Cleaning up temporary tags..."
+          crane delete ${{ needs.metadata.outputs.image_tag_amd64 }} || true
+          crane delete ${{ needs.metadata.outputs.image_tag_arm64 }} || true
+          echo "Cleanup complete"

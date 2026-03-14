@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 
-# Use Ubuntu as the build stage so the installer downloads the glibc binary,
-# which matches the target linuxserver/code-server container (Ubuntu Noble).
-FROM ubuntu:noble AS downloader
+# Builder always runs on amd64 for speed and Kaniko compatibility.
+# The TARGETPLATFORM build-arg controls which binary the installer fetches.
+# hadolint ignore=DL3029
+FROM --platform=linux/amd64 ubuntu:noble AS downloader
 
-ARG TARGETPLATFORM
+ARG TARGETPLATFORM=linux/amd64
 ARG CLAUDE_VERSION=""
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
