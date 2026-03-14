@@ -295,8 +295,8 @@ jobs:
             -d "{
               \"tag_name\": \"${VERSION}\",
               \"target\": \"${{ github.sha }}\",
-              \"name\": \"Claude Code ${VERSION}\",
-              \"body\": \"Docker mod updated to Claude Code ${VERSION}\",
+              \"name\": \"vscode-claude-code: Claude Code ${VERSION}\",
+              \"body\": \"## vscode-claude-code\\n\\nClaude Code CLI updated to **${VERSION}**\\n\\n### Usage\\n\\n\`\`\`yaml\\nDOCKER_MODS: ${{ needs.check-release.outputs.image_base }}:vscode-claude-code\\n\`\`\`\\n\\nOr pin to this version:\\n\\n\`\`\`yaml\\nDOCKER_MODS: ${{ needs.check-release.outputs.image_base }}:${VERSION}\\n\`\`\`\",
               \"draft\": false,
               \"prerelease\": false
             }"
