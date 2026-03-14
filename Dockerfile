@@ -8,13 +8,16 @@ FROM --platform=linux/amd64 ubuntu:noble AS downloader
 ARG TARGETPLATFORM=linux/amd64
 ARG CLAUDE_VERSION=""
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     case "${TARGETPLATFORM}" in \
-        "linux/amd64")  PLATFORM="linux-x64"   ;; \
-        "linux/arm64")  PLATFORM="linux-arm64"  ;; \
+        "linux/amd64")  export PLATFORM="linux-x64"   ;; \
+        "linux/arm64")  export PLATFORM="linux-arm64"  ;; \
         *) echo "Unsupported platform: ${TARGETPLATFORM}" && exit 1 ;; \
     esac; \
     mkdir -p /root-layer/usr/local/bin; \
