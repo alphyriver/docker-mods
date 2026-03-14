@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Install base dependencies
         run: |
-          apk add --no-cache git nodejs bash curl
+          apk add --no-cache git nodejs bash curl sed
           [ -f /usr/bin/node ] || ln -s /usr/bin/nodejs /usr/bin/node
           git config --global --add safe.directory "*"
 
@@ -49,6 +49,16 @@ jobs:
         uses: https://code.forgejo.org/actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive registry host and image base
+        id: meta
+        run: |
+          REGISTRY_HOST=$(echo "${{ github.server_url }}" | sed 's|https://||')
+          IMAGE_BASE="${REGISTRY_HOST}/${{ github.repository }}"
+          echo "registry_host=${REGISTRY_HOST}" >> $GITHUB_OUTPUT
+          echo "image_base=${IMAGE_BASE}" >> $GITHUB_OUTPUT
+          echo "Registry: ${REGISTRY_HOST}"
+          echo "Image base: ${IMAGE_BASE}"
 
       - name: Wait for Docker daemon
         run: |
@@ -80,16 +90,22 @@ jobs:
           docker buildx create --name multiarch --driver docker-container --use
           docker buildx inspect --bootstrap
 
-      - name: Docker login to registry
+      - name: Login to Forgejo registry
         if: github.event_name == 'push'
+        env:
+          REGISTRY_USER: ${{ github.repository_owner }}
+          APPLICATION_TOKEN: ${{ secrets.APPLICATION_TOKEN }}
         run: |
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | \
-            docker login \
-              -u "${{ secrets.DOCKERHUB_USERNAME }}" \
+          echo "${APPLICATION_TOKEN}" | \
+            docker login "${{ steps.meta.outputs.registry_host }}" \
+              -u "${REGISTRY_USER}" \
               --password-stdin
 
       - name: Build and push
         run: |
+          IMAGE_TAG="${{ steps.meta.outputs.image_base }}:${IMAGE_TAG}"
+          echo "Building: ${IMAGE_TAG}"
+
           PUSH_FLAG=""
           if [ "${{ github.event_name }}" = "push" ]; then
             PUSH_FLAG="--push"
@@ -97,7 +113,7 @@ jobs:
 
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --tag "${{ secrets.REGISTRY_URL }}/docker-mods:${IMAGE_TAG}" \
+            --tag "${IMAGE_TAG}" \
             ${PUSH_FLAG} \
             .
 
