@@ -94,7 +94,6 @@ The init script output is visible in `docker logs`:
 | Platform | Status |
 | --- | --- |
 | `linux/amd64` | Supported |
-| `linux/arm64` | Supported |
 
 The mod requires **glibc 2.30+**. The linuxserver/code-server image is based on Ubuntu Noble
 (24.04) which ships with glibc 2.39.
@@ -105,7 +104,7 @@ The mod requires **glibc 2.30+**. The linuxserver/code-server image is based on 
 
 ```bash
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/amd64 \
   -t <your-registry>/docker-mods:vscode-claude-code \
   --push \
   .

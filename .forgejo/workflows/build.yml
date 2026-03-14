@@ -42,8 +42,7 @@ jobs:
     outputs:
       registry_host: ${{ steps.meta.outputs.registry_host }}
       image_base: ${{ steps.meta.outputs.image_base }}
-      image_tag_amd64: ${{ steps.meta.outputs.image_tag_amd64 }}
-      image_tag_arm64: ${{ steps.meta.outputs.image_tag_arm64 }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Derive registry and image metadata
         id: meta
@@ -53,18 +52,17 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
           echo "registry_host=${REGISTRY_HOST}" >> "$GITHUB_OUTPUT"
           echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
-          echo "image_tag_amd64=${IMAGE_BASE}:${SHORT_SHA}-amd64" >> "$GITHUB_OUTPUT"
-          echo "image_tag_arm64=${IMAGE_BASE}:${SHORT_SHA}-arm64" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_BASE}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "Registry: ${REGISTRY_HOST}"
-          echo "Image base: ${IMAGE_BASE}"
+          echo "Building: ${IMAGE_BASE}:${SHORT_SHA}"
 
-  # ── Build (amd64) ────────────────────────────────────────────────
-  build-amd64:
-    name: Build (amd64)
+  # ── Build ────────────────────────────────────────────────────────
+  build:
+    name: Build Image
     runs-on: ubuntu-latest
     needs: [lint, metadata]
     outputs:
-      image_tag: ${{ needs.metadata.outputs.image_tag_amd64 }}
+      image_tag: ${{ needs.metadata.outputs.image_tag }}
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
@@ -86,47 +84,15 @@ jobs:
             /kaniko/executor
             --context=tar://$TARBALL
             --dockerfile=Dockerfile
-            --destination=${{ needs.metadata.outputs.image_tag_amd64 }}
+            --destination=${{ needs.metadata.outputs.image_tag }}
             --custom-platform=linux/amd64
             --build-arg=TARGETPLATFORM=linux/amd64"
-
-  # ── Build (arm64) ────────────────────────────────────────────────
-  build-arm64:
-    name: Build (arm64)
-    runs-on: ubuntu-latest
-    needs: [lint, metadata]
-    outputs:
-      image_tag: ${{ needs.metadata.outputs.image_tag_arm64 }}
-    steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
-
-      - name: Create build context
-        run: |
-          tar -czf /tmp/context.tar.gz -C ${{ github.workspace }} .
-          cp /tmp/context.tar.gz ${{ github.workspace }}/context.tar.gz
-
-      - name: Build and push with Kaniko
-        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
-        with:
-          entrypoint: /busybox/sh
-          args: >-
-            -c "AUTH=$(echo -n '${{ env.REGISTRY_USER }}:${{ secrets.APPLICATION_TOKEN }}' | base64) &&
-            mkdir -p /kaniko/.docker &&
-            printf '{\"auths\":{\"${{ needs.metadata.outputs.registry_host }}\":{\"auth\":\"%s\"}}}' $AUTH > /kaniko/.docker/config.json &&
-            TARBALL=$(find / -name 'context.tar.gz' 2>/dev/null | head -1) &&
-            /kaniko/executor
-            --context=tar://$TARBALL
-            --dockerfile=Dockerfile
-            --destination=${{ needs.metadata.outputs.image_tag_arm64 }}
-            --custom-platform=linux/arm64
-            --build-arg=TARGETPLATFORM=linux/arm64"
 
   # ── Test ──────────────────────────────────────────────────────────
   test:
     name: Test Image
     runs-on: ubuntu-latest
-    needs: [build-amd64, build-arm64, metadata]
+    needs: [build, metadata]
     steps:
       - name: Install crane
         run: |
@@ -138,22 +104,17 @@ jobs:
         run: |
           echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
-      - name: Verify amd64 image
+      - name: Verify image manifest
         run: |
-          crane manifest ${{ needs.metadata.outputs.image_tag_amd64 }}
-          echo "amd64 image verified"
+          crane manifest ${{ needs.metadata.outputs.image_tag }}
+          echo "Image verified: ${{ needs.metadata.outputs.image_tag }}"
 
-      - name: Verify arm64 image
+      - name: Smoke test — verify claude binary
         run: |
-          crane manifest ${{ needs.metadata.outputs.image_tag_arm64 }}
-          echo "arm64 image verified"
-
-      - name: Smoke test — verify claude binary (amd64)
-        run: |
-          crane export ${{ needs.metadata.outputs.image_tag_amd64 }} - | tar -xf - usr/local/bin/claude
+          crane export ${{ needs.metadata.outputs.image_tag }} - | tar -xf - usr/local/bin/claude
           ls -la usr/local/bin/claude
           file usr/local/bin/claude
-          echo "Claude binary verified in amd64 image"
+          echo "Claude binary verified in image"
 
   # ── Security Scan ────────────────────────────────────────────────
   scan:
@@ -179,14 +140,14 @@ jobs:
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --format table \
-            ${{ needs.metadata.outputs.image_tag_amd64 }}
+            ${{ needs.metadata.outputs.image_tag }}
 
           trivy image \
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --format json \
             --output trivy-results.json \
-            ${{ needs.metadata.outputs.image_tag_amd64 }}
+            ${{ needs.metadata.outputs.image_tag }}
 
       - name: Analyze results
         run: |
@@ -224,16 +185,11 @@ jobs:
         run: |
           echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
-      - name: Create multi-arch manifest and tag
+      - name: Tag as release
         run: |
           FINAL_TAG="${{ needs.metadata.outputs.image_base }}:${{ env.IMAGE_TAG }}"
-          echo "Creating multi-arch manifest: ${FINAL_TAG}"
-
-          crane index append \
-            --tag "${FINAL_TAG}" \
-            --manifest ${{ needs.metadata.outputs.image_tag_amd64 }} \
-            --manifest ${{ needs.metadata.outputs.image_tag_arm64 }}
-
+          echo "Tagging: ${FINAL_TAG}"
+          crane copy ${{ needs.metadata.outputs.image_tag }} "${FINAL_TAG}"
           echo "Deployed: ${FINAL_TAG}"
 
   # ── Cleanup ───────────────────────────────────────────────────────
@@ -241,7 +197,7 @@ jobs:
     name: Cleanup
     runs-on: ubuntu-latest
     needs: [deploy, metadata]
-    if: always() && needs.metadata.outputs.image_tag_amd64 != ''
+    if: always() && needs.metadata.outputs.image_tag != ''
     steps:
       - name: Install crane
         run: |
@@ -253,9 +209,8 @@ jobs:
         run: |
           echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.metadata.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
 
-      - name: Delete temporary tags
+      - name: Delete temporary tag
         run: |
-          echo "Cleaning up temporary tags..."
-          crane delete ${{ needs.metadata.outputs.image_tag_amd64 }} || true
-          crane delete ${{ needs.metadata.outputs.image_tag_arm64 }} || true
+          echo "Cleaning up temporary tag: ${{ needs.metadata.outputs.image_tag }}"
+          crane delete ${{ needs.metadata.outputs.image_tag }} || true
           echo "Cleanup complete"
