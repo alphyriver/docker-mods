@@ -272,7 +272,8 @@ jobs:
           crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${{ env.IMAGE_TAG }}"
 
           if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
-            VERSION_TAG="${{ env.IMAGE_TAG }}-${VERSION}"
+            SAFE_VERSION="${VERSION//+/_}"          # <── add this line
+            VERSION_TAG="${{ env.IMAGE_TAG }}-${SAFE_VERSION}"
             echo "Tagging as ${IMAGE_BASE}:${VERSION_TAG}"
             crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${VERSION_TAG}"
           fi
@@ -297,8 +298,9 @@ jobs:
             echo "No version available, skipping release"
             exit 0
           fi
-
-          RELEASE_TAG="${{ env.IMAGE_TAG }}-${VERSION}"
+          
+          SAFE_VERSION="${VERSION//+/_}"
+          RELEASE_TAG="${{ env.IMAGE_TAG }}-${SAFE_VERSION}"
           IMAGE_BASE="${{ needs.check-release.outputs.image_base }}"
           echo "Creating release: ${RELEASE_TAG}"
 
