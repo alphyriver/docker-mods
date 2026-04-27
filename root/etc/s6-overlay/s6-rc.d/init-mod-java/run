@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+echo "**** Java mod: initializing ****"
+
+JDK_DIR="/usr/local/lib/jdk"
+
+if [ ! -x "${JDK_DIR}/bin/java" ]; then
+    echo "**** ERROR: java binary not found at ${JDK_DIR}/bin/java ****"
+    exit 1
+fi
+
+JAVA_VER=$("${JDK_DIR}/bin/java" -version 2>&1 | head -n1 || true)
+JDK_VERSION_FILE="${JDK_DIR}/.mod-version"
+if [ -f "${JDK_VERSION_FILE}" ]; then
+    JDK_LABEL=$(cat "${JDK_VERSION_FILE}")
+else
+    JDK_LABEL="unknown"
+fi
+echo "**** Java installed: ${JDK_LABEL} (${JAVA_VER}) ****"
+
+# Symlink core binaries onto PATH (idempotent).
+for bin in java javac jar jshell jlink jpackage keytool; do
+    if [ -x "${JDK_DIR}/bin/${bin}" ]; then
+        ln -sf "${JDK_DIR}/bin/${bin}" "/usr/local/bin/${bin}"
+    fi
+done
+
+# Export JAVA_HOME for code-server and child terminals via /etc/profile.d.
+PROFILE_FILE="/etc/profile.d/java-mod.sh"
+cat > "${PROFILE_FILE}" <<EOF
+export JAVA_HOME="${JDK_DIR}"
+export PATH="\${JAVA_HOME}/bin:\${PATH}"
+EOF
+chmod 0644 "${PROFILE_FILE}"
+
+# Make JAVA_HOME available to the code-server process (s6 container env).
+S6_ENV_DIR="/var/run/s6/container_environment"
+if [ -d "${S6_ENV_DIR}" ]; then
+    printf '%s' "${JDK_DIR}" > "${S6_ENV_DIR}/JAVA_HOME"
+fi
+
+echo "**** JAVA_HOME=${JDK_DIR} ****"
+echo "**** Java mod: done ****"

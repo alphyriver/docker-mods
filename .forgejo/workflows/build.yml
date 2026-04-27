@@ -1,0 +1,376 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - code-server-java
+  pull_request:
+    branches:
+      - code-server-java
+  schedule:
+    - cron: '0 18 * * *'  # Daily at 2am SGT (UTC+8)
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if version already exists'
+        required: false
+        type: boolean
+        default: false
+
+# Prevent duplicate runs for the same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_TAG: code-server-java
+  JAVA_LTS_VERSION: "21"
+  REGISTRY_USER: package-bot
+  CRANE_VERSION: v0.20.2
+  HADOLINT_VERSION: v2.12.0-alpine
+
+jobs:
+  # ── Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint Dockerfile
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: https://github.com/hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  # ── Check Release ────────────────────────────────────────────────
+  check-release:
+    name: Check Upstream Release
+    runs-on: ubuntu-latest
+    outputs:
+      skip_build: ${{ steps.check.outputs.skip_build }}
+      version: ${{ steps.check.outputs.version }}
+      registry_host: ${{ steps.check.outputs.registry_host }}
+      image_base: ${{ steps.check.outputs.image_base }}
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y jq curl
+
+      - name: Check for new upstream release
+        id: check
+        env:
+          FORGEJO_TOKEN: ${{ secrets.APPLICATION_TOKEN }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+        run: |
+          # Extract registry info (used by all downstream jobs)
+          REGISTRY_HOST=$(echo "${{ github.server_url }}" | sed 's|https://||')
+          IMAGE_BASE="${REGISTRY_HOST}/${{ github.repository }}"
+          echo "registry_host=${REGISTRY_HOST}" >> "$GITHUB_OUTPUT"
+          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
+
+          # For push/PR events, always build (version check is for schedule/dispatch only)
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Push/PR event — skipping version check, always build"
+            # Get version from Adoptium API for tagging purposes
+            TARGET_VERSION=$(curl -fsSL "https://api.adoptium.net/v3/assets/feature_releases/${{ env.JAVA_LTS_VERSION }}/ga?architecture=x64&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=linux&page=0&page_size=1&project=jdk&sort_method=DEFAULT&sort_order=DESC&vendor=eclipse" | jq -r '.[0].version_data.semver')
+            echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Fetch latest Temurin LTS version from Adoptium API
+          TARGET_VERSION=$(curl -fsSL "https://api.adoptium.net/v3/assets/feature_releases/${{ env.JAVA_LTS_VERSION }}/ga?architecture=x64&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=linux&page=0&page_size=1&project=jdk&sort_method=DEFAULT&sort_order=DESC&vendor=eclipse" | jq -r '.[0].version_data.semver')
+          if [ -z "$TARGET_VERSION" ] || [ "$TARGET_VERSION" = "null" ]; then
+            echo "::error::Failed to fetch latest Temurin version from Adoptium API"
+            exit 1
+          fi
+          echo "Latest Temurin LTS release: $TARGET_VERSION"
+
+          # Get latest release from this repository
+          curl --silent -L -H "Authorization: token ${FORGEJO_TOKEN}" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases?limit=1" > releases.json
+
+          REPO_RELEASE=$(jq -r 'if type=="array" and length > 0 then .[0].tag_name else "0.0.0" end' releases.json)
+          if [ "$REPO_RELEASE" = "null" ] || [ -z "$REPO_RELEASE" ]; then
+            REPO_RELEASE="0.0.0"
+          fi
+          echo "Repository release: $REPO_RELEASE"
+
+          # Release tags use format: code-server-java-<version>
+          RELEASE_TAG="${{ env.IMAGE_TAG }}-${TARGET_VERSION}"
+
+          # Strip the branch prefix from repo release for comparison
+          REPO_VERSION=$(echo "$REPO_RELEASE" | sed "s/^${{ env.IMAGE_TAG }}-//")
+          echo "Repo version: $REPO_VERSION"
+
+          # Check if we should skip build
+          if [ "$FORCE_BUILD" = "true" ]; then
+            echo "Force build enabled, proceeding"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$TARGET_VERSION" = "$REPO_VERSION" ]; then
+            echo "Already on version $TARGET_VERSION, skipping build"
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version available: $TARGET_VERSION (current: $REPO_VERSION)"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            echo "version=${TARGET_VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Build ────────────────────────────────────────────────────────
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+    needs: [lint, check-release]
+    if: |
+      always() &&
+      needs.check-release.outputs.skip_build == 'false' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Generate metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          IMAGE_TAG="${{ needs.check-release.outputs.image_base }}:${SHORT_SHA}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building: ${IMAGE_TAG}"
+
+      - name: Create build context
+        run: |
+          tar -czf /tmp/context.tar.gz -C ${{ github.workspace }} .
+          cp /tmp/context.tar.gz ${{ github.workspace }}/context.tar.gz
+
+      - name: Build and push with Kaniko
+        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c "AUTH=$(echo -n '${{ env.REGISTRY_USER }}:${{ secrets.APPLICATION_TOKEN }}' | base64) &&
+            mkdir -p /kaniko/.docker &&
+            printf '{\"auths\":{\"${{ needs.check-release.outputs.registry_host }}\":{\"auth\":\"%s\"}}}' $AUTH > /kaniko/.docker/config.json &&
+            TARBALL=$(find / -name 'context.tar.gz' 2>/dev/null | head -1) &&
+            /kaniko/executor
+            --context=tar://$TARBALL
+            --dockerfile=Dockerfile
+            --destination=${{ steps.meta.outputs.image_tag }}
+            --build-arg=JAVA_LTS_VERSION=${{ env.JAVA_LTS_VERSION }}
+            --custom-platform=linux/amd64"
+
+  # ── Test ──────────────────────────────────────────────────────────
+  test:
+    name: Test Image
+    runs-on: ubuntu-latest
+    needs: [build, check-release]
+    if: needs.check-release.outputs.skip_build == 'false'
+    steps:
+      - name: Install crane
+        run: |
+          apt-get update && apt-get install -y curl
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xzf - crane
+          mv crane /usr/local/bin/
+
+      - name: Login to registry
+        run: |
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.check-release.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+
+      - name: Verify image manifest
+        run: |
+          crane manifest ${{ needs.build.outputs.image_tag }}
+          echo "Image verified: ${{ needs.build.outputs.image_tag }}"
+
+      - name: Smoke test — verify java binary
+        run: |
+          crane export ${{ needs.build.outputs.image_tag }} - | tar -xf - usr/local/lib/jdk/bin/java
+          ls -la usr/local/lib/jdk/bin/java
+          file usr/local/lib/jdk/bin/java
+          echo "Java binary verified in image"
+
+  # ── Security Scan ────────────────────────────────────────────────
+  scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [test, build, check-release]
+    if: needs.check-release.outputs.skip_build == 'false'
+    steps:
+      - name: Install Trivy
+        run: |
+          apt-get update
+          apt-get install -y wget apt-transport-https gnupg lsb-release jq
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/trivy.list
+          apt-get update
+          apt-get install -y trivy
+
+      - name: Run vulnerability scan
+        env:
+          TRIVY_USERNAME: ${{ env.REGISTRY_USER }}
+          TRIVY_PASSWORD: ${{ secrets.APPLICATION_TOKEN }}
+        run: |
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --format table \
+            ${{ needs.build.outputs.image_tag }}
+
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --format json \
+            --output trivy-results.json \
+            ${{ needs.build.outputs.image_tag }}
+
+      - name: Analyze results
+        run: |
+          if [ -f trivy-results.json ]; then
+            VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy-results.json)
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "::warning::Found $VULN_COUNT high/critical vulnerabilities"
+              jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | .[] | "\(.Severity): \(.VulnerabilityID) in \(.PkgName)"' trivy-results.json
+            else
+              echo "No high/critical vulnerabilities found"
+            fi
+          fi
+
+      - name: Upload scan results
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.json
+          retention-days: 7
+
+  # ── Deploy ────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy Tags
+    runs-on: ubuntu-latest
+    needs: [scan, build, check-release]
+    if: github.event_name != 'pull_request' && needs.check-release.outputs.skip_build == 'false'
+    steps:
+      - name: Install crane
+        run: |
+          apt-get update && apt-get install -y curl
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xzf - crane
+          mv crane /usr/local/bin/
+
+      - name: Login to registry
+        run: |
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.check-release.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+
+      - name: Tag as latest and version
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          IMAGE_BASE="${{ needs.check-release.outputs.image_base }}"
+
+          echo "Tagging as ${IMAGE_BASE}:${{ env.IMAGE_TAG }}"
+          crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${{ env.IMAGE_TAG }}"
+
+          if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
+            VERSION_TAG="${{ env.IMAGE_TAG }}-${VERSION}"
+            echo "Tagging as ${IMAGE_BASE}:${VERSION_TAG}"
+            crane copy ${{ needs.build.outputs.image_tag }} "${IMAGE_BASE}:${VERSION_TAG}"
+          fi
+
+  # ── Release ──────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [deploy, check-release]
+    if: github.event_name != 'pull_request' && needs.check-release.outputs.skip_build == 'false'
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y jq
+
+      - name: Create release
+        env:
+          FORGEJO_TOKEN: ${{ secrets.APPLICATION_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "No version available, skipping release"
+            exit 0
+          fi
+
+          RELEASE_TAG="${{ env.IMAGE_TAG }}-${VERSION}"
+          IMAGE_BASE="${{ needs.check-release.outputs.image_base }}"
+          echo "Creating release: ${RELEASE_TAG}"
+
+          # Build release body
+          BODY=$(cat <<'BODY_EOF'
+          ## Docker Mod: code-server-java
+
+          Installs the [Eclipse Temurin](https://adoptium.net/) LTS JDK into [linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers.
+
+          ### What changed
+
+          Eclipse Temurin JDK updated to **VERSION_PLACEHOLDER**.
+
+          ### Image tags
+
+          | Tag | Description |
+          |-----|-------------|
+          | `IMAGE_BASE_PLACEHOLDER:code-server-java` | Always points to the latest build |
+          | `IMAGE_BASE_PLACEHOLDER:RELEASE_TAG_PLACEHOLDER` | Pinned to this specific version |
+
+          ### Usage
+
+          ```yaml
+          services:
+            code-server:
+              image: lscr.io/linuxserver/code-server:latest
+              environment:
+                - DOCKER_MODS=IMAGE_BASE_PLACEHOLDER:code-server-java
+          ```
+          BODY_EOF
+          )
+
+          # Replace placeholders
+          BODY=$(echo "$BODY" | sed "s|VERSION_PLACEHOLDER|${VERSION}|g")
+          BODY=$(echo "$BODY" | sed "s|IMAGE_BASE_PLACEHOLDER|${IMAGE_BASE}|g")
+          BODY=$(echo "$BODY" | sed "s|RELEASE_TAG_PLACEHOLDER|${RELEASE_TAG}|g")
+
+          # Escape for JSON
+          BODY_JSON=$(printf '%s' "$BODY" | jq -Rs .)
+
+          curl -X POST \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases" \
+            -d "{
+              \"tag_name\": \"${RELEASE_TAG}\",
+              \"target\": \"${{ github.sha }}\",
+              \"name\": \"code-server-java: Temurin JDK ${VERSION}\",
+              \"body\": ${BODY_JSON},
+              \"draft\": false,
+              \"prerelease\": false
+            }"
+
+  # ── Cleanup ───────────────────────────────────────────────────────
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy, build, check-release]
+    if: always() && needs.check-release.outputs.skip_build == 'false' && needs.build.outputs.image_tag != ''
+    steps:
+      - name: Install crane
+        run: |
+          apt-get update && apt-get install -y curl
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xzf - crane
+          mv crane /usr/local/bin/
+
+      - name: Login to registry
+        run: |
+          echo "${{ secrets.APPLICATION_TOKEN }}" | crane auth login ${{ needs.check-release.outputs.registry_host }} -u ${{ env.REGISTRY_USER }} --password-stdin
+
+      - name: Delete temporary tag
+        run: |
+          echo "Cleaning up temporary tag: ${{ needs.build.outputs.image_tag }}"
+          crane delete ${{ needs.build.outputs.image_tag }} || true
+          echo "Cleanup complete"

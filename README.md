@@ -1,172 +1,138 @@
-# docker-mods
+# Docker Mod: Java (Eclipse Temurin) for code-server
 
-Custom [Docker mods](https://linuxserver.io/blog/2019-09-14-customizing-our-containers) for
-[LinuxServer.io](https://www.linuxserver.io/) containers. Each mod lives on its own branch and
-is distributed as a single-layer OCI image that gets extracted into a container at boot.
+A [Docker mod](https://linuxserver.io/blog/2019-09-14-customizing-our-containers) that installs
+the latest [Eclipse Temurin](https://adoptium.net/) LTS JDK into
+[linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers.
 
-## Available Mods
-
-| Mod | Branch | Base Image | Description |
-| --- | --- | --- | --- |
-| Claude Code | `vscode-claude-code` | `linuxserver/code-server` | Installs the Claude Code CLI |
-
-## How It Works
-
-```text
-┌──────────────────────────────────────────────────────────┐
-│  Container Boot                                          │
-│                                                          │
-│  1. DOCKER_MODS env var detected                         │
-│  2. Mod image pulled from registry                       │
-│  3. Single layer extracted into container filesystem      │
-│  4. s6-overlay runs mod init scripts                     │
-│  5. Normal container startup continues                   │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
-```
-
-Docker mods are OCI images built `FROM scratch` containing only the files to overlay onto the
-container. They are downloaded and extracted **before** any container init logic runs.
-The [s6-overlay](https://github.com/just-containers/s6-overlay) init system then executes the
-mod's scripts as part of the boot sequence.
+Eclipse Temurin is the free, open-source, production-quality OpenJDK distribution from the
+[Eclipse Adoptium](https://adoptium.net/) project. This mod bakes the full JDK (not just JRE)
+into the mod image — no network access is required at container startup.
 
 ## Quick Start
 
-Add the `DOCKER_MODS` environment variable to your container, pointing to the mod image tag.
-Multiple mods are separated with `|`.
+Add the mod to your code-server container via the `DOCKER_MODS` environment variable:
 
 ```yaml
 services:
   code-server:
     image: lscr.io/linuxserver/code-server:latest
     environment:
-      - DOCKER_MODS=<registry>/docker-mods:vscode-claude-code
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - DOCKER_MODS=ghcr.io/alphyriver/docker-mods:code-server-java
+    volumes:
+      - ./config:/config
+    ports:
+      - 8443:8443
+    restart: unless-stopped
 ```
 
-Each mod branch has its own README with detailed usage instructions and required environment variables.
+Once the container starts, open a terminal in code-server and run:
 
-## Repository Architecture
-
-### Branch-per-mod strategy
-
-```text
-main                          Documentation, repo-level config
-├── vscode-claude-code        Mod: Claude Code for code-server
-├── <image>-<mod-name>        Mod: future mods follow this pattern
-│   └── feat/<description>    Short-lived feature branches
+```bash
+java -version
+javac -version
 ```
 
-- **`main`** contains only documentation and shared configuration. No mod code.
-- **Mod branches** (`<base-image>-<mod-name>`) are independently buildable and deployable.
-- **Feature branches** branch off a mod branch, receive commits, then merge back with `--no-ff`.
+## Environment Variables
 
-### File structure (per mod branch)
+| Variable | Description |
+| --- | --- |
+| `DOCKER_MODS` | Set to `ghcr.io/alphyriver/docker-mods:code-server-java` to enable this mod |
 
-Every mod branch follows this layout:
+## What the Mod Provides
 
-```text
-.
-├── Dockerfile                          # Multi-stage or simple FROM scratch
-├── README.md                           # Mod-specific usage documentation
-├── .dockerignore
-├── .gitattributes
-├── .forgejo/
-│   └── workflows/
-│       └── build.yml                   # CI: build, push, smoke test
-└── root/
-    └── etc/
-        └── s6-overlay/
-            └── s6-rc.d/
-                ├── init-mod-<name>/           # Mod init service
-                │   ├── type                   # "oneshot" or "longrun"
-                │   ├── run                    # Init script (chmod +x)
-                │   ├── up                     # Path to run script
-                │   └── dependencies.d/
-                │       └── init-mods          # Dependency marker (empty)
-                └── user/
-                    └── contents.d/
-                        └── init-mod-<name>    # Service registration (empty)
+- **JDK binaries** installed to `/usr/local/lib/jdk/` (full JDK, not JRE)
+- **Symlinks** created in `/usr/local/bin/` for: `java`, `javac`, `jar`, `jshell`, `jlink`, `jpackage`, `keytool`
+- **`JAVA_HOME`** set to `/usr/local/lib/jdk` and exported via `/etc/profile.d/java-mod.sh`
+- **`JAVA_HOME`** also written to the s6 container environment so the code-server process inherits it
+- **VS Code Java extensions** (e.g. `redhat.java`) will auto-detect the JDK via `JAVA_HOME`. Install extensions yourself through the marketplace — this mod does not manage extensions.
+
+## LTS Version
+
+The default LTS version is **Java 21** (Eclipse Temurin 21). This is a build-time `ARG`:
+
+```bash
+docker buildx build --build-arg JAVA_LTS_VERSION=21 .
 ```
 
-### Build pipeline
+To upgrade to a newer LTS (e.g. Java 25), change `JAVA_LTS_VERSION` in the Dockerfile `ARG` line
+and the CI workflow `check-release` step.
 
-Each mod branch has a Forgejo Actions workflow that:
+## How It Works
 
-1. Triggers on push and pull request to the mod branch
-2. Builds a multi-arch image (`linux/amd64` + `linux/arm64`) using Docker Buildx + QEMU
-3. Pushes to the container registry on direct push (not on PRs)
-4. Runs architecture-specific smoke tests to verify the mod works
+### Build time
 
-### s6-overlay init system
+The mod uses a multi-stage Docker build:
 
-Mods hook into the container's [s6-overlay v3](https://github.com/just-containers/s6-overlay)
-init system. Two service types are supported:
+1. An Ubuntu Noble builder stage fetches the latest Temurin GA release for the given LTS version
+   using the [Adoptium API](https://adoptium.net/temurin/releases/)
+2. The JDK tarball is extracted to `/root-layer/usr/local/lib/jdk/`
+3. A version file is written to `/root-layer/usr/local/lib/jdk/.mod-version`
+4. The final `FROM scratch` layer merges the s6 init scripts and the JDK into one thin image layer
 
-| Type | Use case | Runs |
-| --- | --- | --- |
-| `oneshot` | Initialization, setup, verification | Once at boot, then exits |
-| `longrun` | Background daemons, persistent services | Continuously in foreground |
+### Container boot
 
-Services declare dependencies via empty files in `dependencies.d/`. The typical chain:
+When the container starts with `DOCKER_MODS` pointing to this image:
 
 ```text
 s6 boot
-  → init-mods                          Base LinuxServer init
-    → init-mods-package-install        Package queue processing
-      → init-mod-<your-mod>            Your mod's init script
-        → init-mods-end                All mods finished
-          → container services start
+  → init-mods                    LinuxServer base init
+    → init-mod-java              This mod's init script
+      → Verify java binary       Confirms /usr/local/lib/jdk/bin/java exists
+      → Symlink binaries         Creates /usr/local/bin/java etc.
+      → Write profile.d          Exports JAVA_HOME for login shells
+      → Write s6 env             Makes JAVA_HOME available to code-server process
+      → init-mods-end            All mods finished
+        → code-server starts
 ```
 
-### Dockerfile patterns
+## File Structure
 
-**Simple (overlay files only):**
-
-```dockerfile
-FROM scratch
-COPY root/ /
+```
+root/
+└── etc/
+    └── s6-overlay/
+        └── s6-rc.d/
+            ├── init-mod-java/
+            │   ├── type              # oneshot
+            │   ├── up                # s6 up script
+            │   ├── run               # init script (chmod +x)
+            │   └── dependencies.d/
+            │       └── init-mods     # empty marker
+            └── user/
+                └── contents.d/
+                    └── init-mod-java # empty marker
 ```
 
-**Multi-stage (download or compile during build):**
+## Building Locally
 
-```dockerfile
-FROM alpine:3.20 AS downloader
-RUN curl -fsSL ... -o /root-layer/usr/local/bin/tool
-
-FROM scratch
-COPY root/ /
-COPY --from=downloader /root-layer/ /
+```bash
+docker buildx build --platform linux/amd64 --load -t docker-mods:code-server-java .
+docker run --rm --entrypoint /usr/local/lib/jdk/bin/java docker-mods:code-server-java -version
 ```
 
-The final image is always `FROM scratch` — a single layer containing only the files to overlay.
+Expected output: `openjdk version "21.x.x" ...` from Eclipse Temurin.
 
-## Development
+## Troubleshooting
 
-See [CLAUDE.md](CLAUDE.md) for detailed conventions covering:
+**`java: command not found` in terminal**
 
-- Branch and merge strategy
-- Commit message format (Conventional Commits)
-- Development workflow (Plan → Design → Implement → Test)
-- s6-overlay script patterns and examples
-- Forgejo CI/CD configuration
-- Quality standards and testing checklist
-- Naming conventions
+The symlinks are set up by the s6 init script at container start. Ensure:
+- `DOCKER_MODS` is correctly set in your container environment
+- The container logs show `**** Java mod: done ****` during startup
 
-### Creating a new mod
+**VS Code Java extension not detecting JDK**
 
-1. Create a new branch from `main` named `<base-image>-<mod-name>`
-2. Copy the file structure from an existing mod branch
-3. Implement your s6 init script in `root/etc/s6-overlay/s6-rc.d/init-mod-<name>/run`
-4. Write a `Dockerfile` (simple or multi-stage as needed)
-5. Add a Forgejo workflow in `.forgejo/workflows/build.yml`
-6. Update the mod table in this README on `main`
+The `redhat.java` extension reads `JAVA_HOME`. The mod sets this in the s6 container environment
+so code-server inherits it. If the extension still doesn't detect it:
+1. Open VS Code settings and search for `java.home`
+2. Set it to `/usr/local/lib/jdk`
 
-### Requirements
+**Checking installed version**
 
-- Docker with Buildx (multi-arch support)
-- QEMU user-static (for cross-platform builds on x86 hosts)
-- Forgejo instance with Actions enabled and registry secrets configured
-
-## License
-
-See [LICENSE](LICENSE).
+```bash
+cat /usr/local/lib/jdk/.mod-version
+java -version
+```

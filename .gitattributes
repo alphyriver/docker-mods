@@ -1,0 +1,2 @@
+* text=auto eol=lf
+root/etc/s6-overlay/s6-rc.d/init-mod-java/run text eol=lf
