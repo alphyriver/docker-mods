@@ -25,7 +25,7 @@ fi
 if ! command -v code >/dev/null 2>&1; then
     cat > /usr/local/bin/code <<'SHIM'
 #!/usr/bin/env bash
-exec s6-setuidgid abc /app/code-server/bin/code-server --extensions-dir /config/extensions "$@"
+exec /app/code-server/bin/code-server --extensions-dir /config/extensions "$@"
 SHIM
     chmod +x /usr/local/bin/code
 fi
