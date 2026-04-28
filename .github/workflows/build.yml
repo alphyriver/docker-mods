@@ -190,10 +190,8 @@ jobs:
           [ -z "$VERSION" ] || [ "$VERSION" = "null" ] && exit 0
           SAFE_VERSION="${VERSION//+/_}"
           IMAGE_BASE="${{ env.REGISTRY }}/${{ github.repository }}"
-          gh release create "${{ env.IMAGE_TAG }}-${SAFE_VERSION}" \
-            --repo "${{ github.repository }}" \
-            --title "code-server-java: Temurin JDK ${VERSION}" \
-            --notes "## Docker Mod: code-server-java
+          cat > /tmp/release-notes.md << NOTES_EOF
+## Docker Mod: code-server-java
 
 Installs [Eclipse Temurin](https://adoptium.net/) LTS JDK into [linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers.
 
@@ -207,7 +205,12 @@ Installs [Eclipse Temurin](https://adoptium.net/) LTS JDK into [linuxserver/code
 \`\`\`yaml
 environment:
   - DOCKER_MODS=${IMAGE_BASE}:code-server-java
-\`\`\`"
+\`\`\`
+NOTES_EOF
+          gh release create "${{ env.IMAGE_TAG }}-${SAFE_VERSION}" \
+            --repo "${{ github.repository }}" \
+            --title "code-server-java: Temurin JDK ${VERSION}" \
+            --notes-file /tmp/release-notes.md
 
   # ── Cleanup ───────────────────────────────────────────────────────
   cleanup:
