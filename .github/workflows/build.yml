@@ -186,10 +186,8 @@ jobs:
           VERSION="${{ needs.check-release.outputs.version }}"
           [ -z "$VERSION" ] || [ "$VERSION" = "null" ] && exit 0
           IMAGE_BASE="${{ env.REGISTRY }}/${{ github.repository }}"
-          gh release create "${{ env.IMAGE_TAG }}-${VERSION}" \
-            --repo "${{ github.repository }}" \
-            --title "vscode-claude-code: Claude Code ${VERSION}" \
-            --notes "## Docker Mod: vscode-claude-code
+          cat > /tmp/release-notes.md << NOTES_EOF
+## Docker Mod: vscode-claude-code
 
 Installs [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) CLI into [linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers.
 
@@ -204,7 +202,12 @@ Installs [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) 
 environment:
   - DOCKER_MODS=${IMAGE_BASE}:vscode-claude-code
   - ANTHROPIC_API_KEY=sk-ant-your-key-here
-\`\`\`"
+\`\`\`
+NOTES_EOF
+          gh release create "${{ env.IMAGE_TAG }}-${VERSION}" \
+            --repo "${{ github.repository }}" \
+            --title "vscode-claude-code: Claude Code ${VERSION}" \
+            --notes-file /tmp/release-notes.md
 
   # ── Cleanup ───────────────────────────────────────────────────────
   cleanup:
