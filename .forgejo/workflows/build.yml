@@ -3,10 +3,10 @@ name: CI/CD Pipeline
 on:
   push:
     branches:
-      - vscode-claude-code
+      - code-server-claude
   pull_request:
     branches:
-      - vscode-claude-code
+      - code-server-claude
   schedule:
     - cron: '0 18 * * 0'  # Weekly Sunday 02:00 SGT
   workflow_dispatch:
@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_TAG: vscode-claude-code
+  IMAGE_TAG: code-server-claude
   REGISTRY_USER: package-bot
   CRANE_VERSION: v0.20.2
   HADOLINT_VERSION: v2.12.0-alpine
