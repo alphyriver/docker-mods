@@ -2,9 +2,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [vscode-claude-code]
+    branches: [code-server-claude]
   pull_request:
-    branches: [vscode-claude-code]
+    branches: [code-server-claude]
   schedule:
     - cron: '0 18 * * 0'  # Weekly Sunday 02:00 SGT
   workflow_dispatch:
@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_TAG: vscode-claude-code
+  IMAGE_TAG: code-server-claude
   REGISTRY: ghcr.io
   REGISTRY_USER: ${{ github.repository_owner }}
   CRANE_VERSION: v0.20.2
