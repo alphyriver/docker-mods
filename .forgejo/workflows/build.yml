@@ -98,7 +98,7 @@ jobs:
           fi
           echo "Repository release: $REPO_RELEASE"
 
-          # Release tags use format: vscode-claude-code-<version>
+          # Release tags use format: code-server-claude-<version>
           RELEASE_TAG="${{ env.IMAGE_TAG }}-${TARGET_VERSION}"
 
           # Strip the branch prefix from repo release for comparison
@@ -302,7 +302,7 @@ jobs:
 
           # Build release body
           BODY=$(cat <<'BODY_EOF'
-          ## Docker Mod: vscode-claude-code
+          ## Docker Mod: code-server-claude
 
           Installs the [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) CLI into [linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers.
 
@@ -314,7 +314,7 @@ jobs:
 
           | Tag | Description |
           |-----|-------------|
-          | `IMAGE_BASE_PLACEHOLDER:vscode-claude-code` | Always points to the latest build |
+          | `IMAGE_BASE_PLACEHOLDER:code-server-claude` | Always points to the latest build |
           | `IMAGE_BASE_PLACEHOLDER:RELEASE_TAG_PLACEHOLDER` | Pinned to this specific version |
 
           ### Usage
@@ -324,7 +324,7 @@ jobs:
             code-server:
               image: lscr.io/linuxserver/code-server:latest
               environment:
-                - DOCKER_MODS=IMAGE_BASE_PLACEHOLDER:vscode-claude-code
+                - DOCKER_MODS=IMAGE_BASE_PLACEHOLDER:code-server-claude
                 - ANTHROPIC_API_KEY=sk-ant-your-key-here
           ```
           BODY_EOF
@@ -345,7 +345,7 @@ jobs:
             -d "{
               \"tag_name\": \"${RELEASE_TAG}\",
               \"target\": \"${{ github.sha }}\",
-              \"name\": \"vscode-claude-code: Claude Code ${VERSION}\",
+              \"name\": \"code-server-claude: Claude Code ${VERSION}\",
               \"body\": ${BODY_JSON},
               \"draft\": false,
               \"prerelease\": false
