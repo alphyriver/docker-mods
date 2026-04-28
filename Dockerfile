@@ -5,15 +5,17 @@ FROM ubuntu:noble AS downloader
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG JAVA_LTS_VERSION=21
-ARG TARGETARCH=x64
+ARG TARGETARCH=amd64
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl jq tar \
     && rm -rf /var/lib/apt/lists/*
 
+COPY root/ /root-layer/
+
 RUN set -eux; \
-    mkdir -p /root-layer/usr/local/lib /root-layer/usr/local/bin; \
+    mkdir -p /root-layer/usr/local/lib; \
     case "${TARGETARCH}" in \
       amd64|x64) ARCH="x64" ;; \
       arm64|aarch64) ARCH="aarch64" ;; \
@@ -35,5 +37,4 @@ FROM scratch
 
 LABEL maintainer="kazes"
 
-COPY root/ /
 COPY --from=downloader /root-layer/ /
