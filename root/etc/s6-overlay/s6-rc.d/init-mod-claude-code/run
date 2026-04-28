@@ -3,13 +3,13 @@
 echo "**** Claude Code mod: initializing ****"
 
 # ── Sandbox runtime dependencies ──────────────────────────────────────────────
-# bubblewrap and socat are required for Claude Code sandbox mode.
-# @anthropic-ai/sandbox-runtime provides the seccomp BPF filter that allows
-# Shift+Enter to work and blocks unix domain socket access inside the sandbox.
-
+# bubblewrap + socat: required for Claude Code sandbox mode.
+# npm: needed to install @anthropic-ai/sandbox-runtime (Ubuntu's nodejs package
+#      does not bundle npm; it must be installed separately).
 MISSING_PKGS=()
-command -v bwrap  >/dev/null 2>&1 || MISSING_PKGS+=(bubblewrap)
-command -v socat  >/dev/null 2>&1 || MISSING_PKGS+=(socat)
+command -v bwrap >/dev/null 2>&1 || MISSING_PKGS+=(bubblewrap)
+command -v socat >/dev/null 2>&1 || MISSING_PKGS+=(socat)
+command -v npm   >/dev/null 2>&1 || MISSING_PKGS+=(npm)
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "**** Installing sandbox dependencies: ${MISSING_PKGS[*]} ****"
@@ -18,24 +18,41 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     rm -rf /var/lib/apt/lists/*
 fi
 
-# Install sandbox-runtime (seccomp filter + Shift+Enter fix) if not present
+# ── code shim ─────────────────────────────────────────────────────────────────
+# Claude Code calls 'code --force --install-extension anthropic.claude-code'
+# on startup to verify/install its VS Code extension. code-server does not
+# ship a 'code' binary, so we create a shim that delegates to code-server.
+if ! command -v code >/dev/null 2>&1; then
+    cat > /usr/local/bin/code <<'SHIM'
+#!/usr/bin/env bash
+exec s6-setuidgid abc /app/code-server/bin/code-server --extensions-dir /config/extensions "$@"
+SHIM
+    chmod +x /usr/local/bin/code
+fi
+
+# ── Sandbox runtime (Shift+Enter + seccomp filter) ───────────────────────────
 if ! npm list -g @anthropic-ai/sandbox-runtime >/dev/null 2>&1; then
     echo "**** Installing @anthropic-ai/sandbox-runtime ****"
     npm install -g @anthropic-ai/sandbox-runtime
 fi
 
-# ── Claude binary check ────────────────────────────────────────────────────────
+# ── Claude binary ─────────────────────────────────────────────────────────────
+# Prefer the mod-baked binary at /usr/local/bin/claude. If absent, fall back to
+# the extension-managed binary that the VS Code extension keeps up to date.
+if ! command -v claude >/dev/null 2>&1 && [ -x "/config/.local/bin/claude" ]; then
+    echo "**** Symlinking claude from /config/.local/bin/claude ****"
+    ln -sf /config/.local/bin/claude /usr/local/bin/claude
+fi
+
 if command -v claude >/dev/null 2>&1; then
-    CLAUDE_VER=$(claude --version 2>&1 || true)
-    echo "**** Claude Code installed: ${CLAUDE_VER} ****"
+    echo "**** Claude Code installed: $(claude --version 2>&1 || true) ****"
 else
-    echo "**** ERROR: claude binary not found at /usr/local/bin/claude ****"
+    echo "**** ERROR: claude binary not found ****"
     exit 1
 fi
 
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     echo "**** WARNING: ANTHROPIC_API_KEY is not set ****"
-    echo "****          Add: -e ANTHROPIC_API_KEY=sk-ant-... to your container ****"
 else
     echo "**** ANTHROPIC_API_KEY is configured ****"
 fi
