@@ -2,6 +2,29 @@
 
 echo "**** Claude Code mod: initializing ****"
 
+# ── Sandbox runtime dependencies ──────────────────────────────────────────────
+# bubblewrap and socat are required for Claude Code sandbox mode.
+# @anthropic-ai/sandbox-runtime provides the seccomp BPF filter that allows
+# Shift+Enter to work and blocks unix domain socket access inside the sandbox.
+
+MISSING_PKGS=()
+command -v bwrap  >/dev/null 2>&1 || MISSING_PKGS+=(bubblewrap)
+command -v socat  >/dev/null 2>&1 || MISSING_PKGS+=(socat)
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo "**** Installing sandbox dependencies: ${MISSING_PKGS[*]} ****"
+    apt-get update -qq
+    apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
+    rm -rf /var/lib/apt/lists/*
+fi
+
+# Install sandbox-runtime (seccomp filter + Shift+Enter fix) if not present
+if ! npm list -g @anthropic-ai/sandbox-runtime >/dev/null 2>&1; then
+    echo "**** Installing @anthropic-ai/sandbox-runtime ****"
+    npm install -g @anthropic-ai/sandbox-runtime
+fi
+
+# ── Claude binary check ────────────────────────────────────────────────────────
 if command -v claude >/dev/null 2>&1; then
     CLAUDE_VER=$(claude --version 2>&1 || true)
     echo "**** Claude Code installed: ${CLAUDE_VER} ****"
