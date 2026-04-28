@@ -13,16 +13,16 @@ is distributed as a single-layer OCI image that gets extracted into a container 
 ## How It Works
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│  Container Boot                                          │
-│                                                          │
-│  1. DOCKER_MODS env var detected                         │
-│  2. Mod image pulled from registry                       │
-│  3. Single layer extracted into container filesystem      │
-│  4. s6-overlay runs mod init scripts                     │
-│  5. Normal container startup continues                   │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Container Boot                                                   │
+│                                                                   │
+│  1. DOCKER_MODS env var detected                                  │
+│  2. Mod image pulled from registry                                │
+│  3. Single layer extracted into container filesystem              │
+│  4. s6-overlay runs mod init scripts                              │
+│  5. Normal container startup continues                            │
+│                                                                   │
+└─────────────────────────────────────────────────────────┘
 ```
 
 Docker mods are OCI images built `FROM scratch` containing only the files to overlay onto the
