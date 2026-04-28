@@ -8,7 +8,7 @@ on:
     branches:
       - code-server-java
   schedule:
-    - cron: '0 18 * * *'  # Daily at 2am SGT (UTC+8)
+    - cron: '0 18 * * 0'  # Weekly Sunday 02:00 SGT
   workflow_dispatch:
     inputs:
       force_build:
