@@ -187,26 +187,26 @@ jobs:
           [ -z "$VERSION" ] || [ "$VERSION" = "null" ] && exit 0
           IMAGE_BASE="${{ env.REGISTRY }}/${{ github.repository }}"
           {
-            echo "## Docker Mod: vscode-claude-code"
+            echo "## Docker Mod: code-server-claude"
             echo ""
             echo "Installs [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) CLI into [linuxserver/code-server](https://docs.linuxserver.io/images/docker-code-server/) containers."
             echo ""
             echo "### Image tags"
             echo "| Tag | Description |"
             echo "|-----|-------------|"
-            echo "| \`${IMAGE_BASE}:vscode-claude-code\` | Always latest |"
-            echo "| \`${IMAGE_BASE}:vscode-claude-code-${VERSION}\` | Pinned to this version |"
+            echo "| \`${IMAGE_BASE}:code-server-claude\` | Always latest |"
+            echo "| \`${IMAGE_BASE}:code-server-claude-${VERSION}\` | Pinned to this version |"
             echo ""
             echo "### Usage"
             echo '```yaml'
             echo "environment:"
-            echo "  - DOCKER_MODS=${IMAGE_BASE}:vscode-claude-code"
+            echo "  - DOCKER_MODS=${IMAGE_BASE}:code-server-claude"
             echo "  - ANTHROPIC_API_KEY=sk-ant-your-key-here"
             echo '```'
           } > /tmp/release-notes.md
           gh release create "${{ env.IMAGE_TAG }}-${VERSION}" \
             --repo "${{ github.repository }}" \
-            --title "vscode-claude-code: Claude Code ${VERSION}" \
+            --title "code-server-claude: Claude Code ${VERSION}" \
             --notes-file /tmp/release-notes.md
 
   # ── Cleanup ───────────────────────────────────────────────────────
