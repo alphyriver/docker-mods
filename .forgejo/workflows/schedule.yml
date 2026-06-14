@@ -1,0 +1,24 @@
+name: Weekly Update Dispatcher
+
+on:
+  schedule:
+    - cron: '0 18 * * 0'  # Weekly Sunday 02:00 SGT
+  workflow_dispatch: {}
+
+jobs:
+  dispatch:
+    name: Trigger ${{ matrix.branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        branch:
+          - code-server-claude
+          - code-server-java
+    steps:
+      - name: Dispatch workflow_dispatch on ${{ matrix.branch }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: token ${{ secrets.APPLICATION_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
+            -d "{\"ref\": \"${{ matrix.branch }}\"}"
